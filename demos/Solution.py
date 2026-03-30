@@ -1,278 +1,517 @@
 import sys
-from typing import List, Tuple
-
-try:
-    from shapely.affinity import translate
-    from shapely.geometry import MultiPoint, Point, Polygon
-    from shapely.ops import nearest_points, triangulate, unary_union
-except Exception as exc:  # pragma: no cover
-    print(f"Import error: {exc}", file=sys.stderr)
-    raise
-
+import math
 
 EPS = 1e-9
-OUTPUT_EPS = 5e-7
 
+def cross_vec(a, b):
+    return a[0] * b[1] - a[1] * b[0]
 
-class Vector2D:
-    __slots__ = ("x", "y")
+def cross(o, a, b):
+    return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
 
-    def __init__(self, x: float = 0.0, y: float = 0.0):
-        self.x = x
-        self.y = y
+def dot(a, b):
+    return a[0] * b[0] + a[1] * b[1]
 
-    def __add__(self, other: "Vector2D") -> "Vector2D":
-        return Vector2D(self.x + other.x, self.y + other.y)
+def sub(a, b):
+    return (a[0] - b[0], a[1] - b[1])
 
-    def __sub__(self, other: "Vector2D") -> "Vector2D":
-        return Vector2D(self.x - other.x, self.y - other.y)
+def add(a, b):
+    return (a[0] + b[0], a[1] + b[1])
 
+def scale(a, s):
+    return (a[0] * s, a[1] * s)
 
-# 全局数据
-n1 = 0
-n2 = 0
-m = 0
-polygon1_vertices: List[Vector2D] = []
-polygon2_vertices: List[Vector2D] = []
-test_cases: List[Vector2D] = []
+def norm(a):
+    return math.sqrt(a[0] * a[0] + a[1] * a[1])
 
-# 预处理结果
-poly_a = None
-poly_b = None
-nfp_region = None
-nfp_boundary = None
+def normalize(a):
+    n = norm(a)
+    if n < EPS:
+        return (0.0, 0.0)
+    return (a[0] / n, a[1] / n)
 
+def perp(a):
+    return (-a[1], a[0])
 
-def _signed_area(vertices: List[Vector2D]) -> float:
+def signed_area(poly):
+    n = len(poly)
     area = 0.0
-    n = len(vertices)
     for i in range(n):
         j = (i + 1) % n
-        area += vertices[i].x * vertices[j].y - vertices[j].x * vertices[i].y
-    return area * 0.5
+        area += poly[i][0] * poly[j][1] - poly[j][0] * poly[i][1]
+    return area / 2.0
 
+def ensure_ccw(poly):
+    if signed_area(poly) < 0:
+        poly.reverse()
+    return poly
 
+def is_convex(poly):
+    n = len(poly)
+    for i in range(n):
+        if cross(poly[i], poly[(i + 1) % n], poly[(i + 2) % n]) < -EPS:
+            return False
+    return True
 
-def _ensure_ccw(vertices: List[Vector2D]) -> List[Vector2D]:
-    if _signed_area(vertices) < 0.0:
-        return list(reversed(vertices))
-    return vertices[:]
+def closest_point_on_segment(p, a, b):
+    ab = sub(b, a)
+    ab_sq = dot(ab, ab)
+    if ab_sq < EPS * EPS:
+        dx, dy = p[0] - a[0], p[1] - a[1]
+        return a, math.sqrt(dx*dx + dy*dy)
+    t = dot(sub(p, a), ab) / ab_sq
+    t = max(0.0, min(1.0, t))
+    cp = (a[0] + ab[0] * t, a[1] + ab[1] * t)
+    dx, dy = p[0] - cp[0], p[1] - cp[1]
+    return cp, math.sqrt(dx*dx + dy*dy)
 
+def point_in_polygon(pt, poly):
+    """1=inside, 0=boundary, -1=outside"""
+    n = len(poly)
+    wn = 0
+    px, py = pt
+    for i in range(n):
+        ax, ay = poly[i]
+        bx, by = poly[(i + 1) % n]
+        cp = (bx - ax) * (py - ay) - (by - ay) * (px - ax)
+        if abs(cp) < EPS:
+            d = (bx - ax) * (px - ax) + (by - ay) * (py - ay)
+            l2 = (bx - ax) * (bx - ax) + (by - ay) * (by - ay)
+            if -EPS <= d <= l2 + EPS:
+                return 0
+        if ay <= py:
+            if by > py and cp > EPS:
+                wn += 1
+        else:
+            if by <= py and cp < -EPS:
+                wn -= 1
+    return 1 if wn != 0 else -1
 
+# ============================================================
+# Minkowski sum of two convex polygons (both CCW)
+# ============================================================
 
-def _to_shapely_polygon(vertices: List[Vector2D]) -> Polygon:
-    coords = [(v.x, v.y) for v in _ensure_ccw(vertices)]
-    return Polygon(coords).buffer(0)
+def minkowski_sum_convex(P, Q):
+    n, m = len(P), len(Q)
+    if n == 0 or m == 0:
+        return []
 
+    def bottom_idx(poly):
+        idx = 0
+        for i in range(1, len(poly)):
+            if (poly[i][1] < poly[idx][1] - EPS or
+                (abs(poly[i][1] - poly[idx][1]) < EPS and poly[i][0] < poly[idx][0])):
+                idx = i
+        return idx
 
+    ip = bottom_idx(P)
+    iq = bottom_idx(Q)
+    P2 = P[ip:] + P[:ip]
+    Q2 = Q[iq:] + Q[:iq]
 
-def _triangle_coords(tri: Polygon) -> List[Tuple[float, float]]:
-    coords = list(tri.exterior.coords)
-    if len(coords) >= 4:
-        coords = coords[:-1]
-    return coords
+    result = []
+    i, j = 0, 0
+    while i < n or j < m:
+        result.append((P2[i % n][0] + Q2[j % m][0], P2[i % n][1] + Q2[j % m][1]))
+        ep = sub(P2[(i + 1) % n], P2[i % n])
+        eq = sub(Q2[(j + 1) % m], Q2[j % m])
+        c = ep[0] * eq[1] - ep[1] * eq[0]
+        if i >= n:
+            j += 1
+        elif j >= m:
+            i += 1
+        elif c > EPS:
+            i += 1
+        elif c < -EPS:
+            j += 1
+        else:
+            i += 1
+            j += 1
 
+    cleaned = []
+    nr = len(result)
+    for i in range(nr):
+        a = result[(i - 1) % nr]
+        b = result[i]
+        c = result[(i + 1) % nr]
+        if abs(cross(a, b, c)) > EPS:
+            cleaned.append(b)
+    return cleaned if cleaned else result
 
+# ============================================================
+# Ear-clipping triangulation
+# ============================================================
 
-def _negate_polygon(poly: Polygon) -> Polygon:
-    coords = [(-x, -y) for x, y in list(poly.exterior.coords)[:-1]]
-    return Polygon(coords).buffer(0)
+def point_in_triangle_inclusive(p, a, b, c):
+    d1 = cross(a, b, p)
+    d2 = cross(b, c, p)
+    d3 = cross(c, a, p)
+    has_neg = (d1 < -EPS) or (d2 < -EPS) or (d3 < -EPS)
+    has_pos = (d1 > EPS) or (d2 > EPS) or (d3 > EPS)
+    return not (has_neg and has_pos)
 
+def triangulate(poly):
+    pts = list(poly)
+    n = len(pts)
+    if n < 3:
+        return []
+    if n == 3:
+        return [list(pts)]
 
+    indices = list(range(n))
+    triangles = []
 
-def _triangulate_inside(poly: Polygon):
-    # shapely.ops.triangulate 返回 Delaunay 三角形，需要过滤掉多边形外部部分
-    pieces = []
-    for tri in triangulate(poly):
-        inter = tri.intersection(poly)
-        if inter.is_empty:
-            continue
-        if inter.geom_type == "Polygon" and inter.area > EPS:
-            pieces.append(inter)
-        elif inter.geom_type == "MultiPolygon":
-            for g in inter.geoms:
-                if g.area > EPS:
-                    pieces.append(g)
-    return pieces
+    for _ in range(n * n):
+        ni = len(indices)
+        if ni <= 3:
+            break
+        found = False
+        for idx in range(ni):
+            pi = (idx - 1) % ni
+            ni_idx = (idx + 1) % ni
+            a = pts[indices[pi]]
+            b = pts[indices[idx]]
+            c = pts[indices[ni_idx]]
 
+            if cross(a, b, c) < EPS:
+                continue
 
+            ear = True
+            for k in range(ni):
+                if k == pi or k == idx or k == ni_idx:
+                    continue
+                if point_in_triangle_inclusive(pts[indices[k]], a, b, c):
+                    ear = False
+                    break
 
-def _convex_minkowski_sum(poly1: Polygon, poly2: Polygon) -> Polygon:
-    pts1 = _triangle_coords(poly1)
-    pts2 = _triangle_coords(poly2)
-    summed = [(x1 + x2, y1 + y2) for x1, y1 in pts1 for x2, y2 in pts2]
-    hull = MultiPoint(summed).convex_hull
-    if hull.geom_type == "Polygon":
-        return hull
-    # 退化情形理论上不会出现，因为输入简单多边形且任意三个顶点不共线
-    return hull.buffer(0)
+            if ear:
+                triangles.append([a, b, c])
+                indices.pop(idx)
+                found = True
+                break
 
+        if not found:
+            break
 
+    if len(indices) == 3:
+        triangles.append([pts[indices[0]], pts[indices[1]], pts[indices[2]]])
+    return triangles
 
-def _build_nfp(poly_a_obj: Polygon, poly_b_obj: Polygon):
-    tris_a = _triangulate_inside(poly_a_obj)
-    tris_b = _triangulate_inside(poly_b_obj)
+# ============================================================
+# Ray-segment intersection
+# ============================================================
 
-    neg_tris_b = [_negate_polygon(tri) for tri in tris_b]
-    pieces = []
+def ray_segment_intersect_t(ox, oy, dx, dy, ax, ay, bx, by):
+    """
+    Find t > 0 where ray (ox+t*dx, oy+t*dy) intersects segment (ax,ay)-(bx,by).
+    Returns t or -1 if no intersection.
+    """
+    ex, ey = bx - ax, by - ay
+    denom = dx * ey - dy * ex
+    if abs(denom) < EPS:
+        return -1.0
+    fx, fy = ax - ox, ay - oy
+    t = (fx * ey - fy * ex) / denom
+    s = (fx * dy - fy * dx) / denom
+    if t > EPS and -EPS <= s <= 1.0 + EPS:
+        return t
+    return -1.0
+
+# ============================================================
+# NFP computation
+# ============================================================
+
+def compute_nfp_parts(poly_a, poly_b):
+    neg_b = [(-p[0], -p[1]) for p in poly_b]
+    ensure_ccw(neg_b)
+
+    tris_a = triangulate(list(poly_a))
+    tris_neg_b = triangulate(neg_b)
+
+    parts = []
     for ta in tris_a:
-        for tb in neg_tris_b:
-            piece = _convex_minkowski_sum(ta, tb)
-            if not piece.is_empty and piece.area > EPS:
-                pieces.append(piece)
+        ta_ccw = list(ta)
+        ensure_ccw(ta_ccw)
+        for tb in tris_neg_b:
+            tb_ccw = list(tb)
+            ensure_ccw(tb_ccw)
+            ms = minkowski_sum_convex(ta_ccw, tb_ccw)
+            if ms and len(ms) >= 3:
+                parts.append(ms)
+    return parts
 
-    if not pieces:
-        return Polygon()
+# ============================================================
+# Precompute edge normals for all NFP parts
+# ============================================================
 
-    region = unary_union(pieces).buffer(0)
-    return region
-
-
-
-def pre_process():
-    global poly_a, poly_b, nfp_region, nfp_boundary
-
-    poly_a = _to_shapely_polygon(polygon1_vertices)
-    poly_b = _to_shapely_polygon(polygon2_vertices)
-
-    nfp_region = _build_nfp(poly_a, poly_b)
-    nfp_boundary = nfp_region.boundary
-
-
-
-def gen_solution(vec: Vector2D) -> Vector2D:
-    if nfp_region.is_empty:
-        return Vector2D(0.0, 0.0)
-
-    p = Point(vec.x, vec.y)
-
-    # 只有当平移向量位于 NFP 内部时，两多边形内部才重叠
-    if not nfp_region.contains(p):
-        return Vector2D(0.0, 0.0)
-
-    nearest = nearest_points(p, nfp_boundary)[1]
-    dx = nearest.x - vec.x
-    dy = nearest.y - vec.y
-
-    if abs(dx) < OUTPUT_EPS:
-        dx = 0.0
-    if abs(dy) < OUTPUT_EPS:
-        dy = 0.0
-
-    return Vector2D(dx, dy)
-
-
-
-def _parse_vertices_from_tokens(tokens: List[str], cnt: int) -> List[Vector2D]:
-    if len(tokens) != cnt * 2:
-        raise ValueError(f"expect {cnt * 2} float numbers but get {len(tokens)}")
-    vals = list(map(float, tokens))
-    return [Vector2D(vals[i], vals[i + 1]) for i in range(0, len(vals), 2)]
-
-
-
-def _read_polygons_flexibly(cnt1: int, cnt2: int):
+def precompute_normals(parts):
     """
-    兼容两种输入：
-    1) demo 版本：每个顶点各占一行；
-    2) 任务书版本：A、B 各自整行给出所有坐标。
-    这样不会破坏 demo 的输入输出格式，同时也能直接跑官方样例。
+    Precompute all unique candidate direction vectors from NFP part edges and vertices.
+    Returns a list of normalized direction vectors.
     """
-    first = sys.stdin.readline()
-    if not first:
-        raise EOFError
-    tokens = first.split()
+    dir_set = set()
+    
+    for part in parts:
+        n = len(part)
+        for i in range(n):
+            j = (i + 1) % n
+            edge = sub(part[j], part[i])
+            normal = normalize(perp(edge))
+            if norm(normal) > EPS:
+                # Round to reduce duplicates
+                key = (round(normal[0], 8), round(normal[1], 8))
+                dir_set.add(key)
+                dir_set.add((-key[0], -key[1]))
+    
+    return list(dir_set)
 
-    if len(tokens) == cnt1 * 2:
-        poly1 = _parse_vertices_from_tokens(tokens, cnt1)
-        second = sys.stdin.readline()
-        if not second:
-            raise EOFError
-        poly2 = _parse_vertices_from_tokens(second.split(), cnt2)
-        return poly1, poly2
+# ============================================================
+# Solver
+# ============================================================
 
-    if len(tokens) != 2:
-        raise ValueError("unsupported polygon input format")
+class Solver:
+    def __init__(self, poly_a, poly_b):
+        self.poly_a = list(poly_a)
+        self.poly_b = list(poly_b)
+        ensure_ccw(self.poly_a)
+        ensure_ccw(self.poly_b)
+        
+        self.ref_point = self.poly_b[0]
+        self.both_convex = is_convex(self.poly_a) and is_convex(self.poly_b)
+        
+        if self.both_convex:
+            neg_b = [(-p[0], -p[1]) for p in self.poly_b]
+            ensure_ccw(neg_b)
+            self.nfp = minkowski_sum_convex(list(self.poly_a), neg_b)
+            self.nfp_parts = [self.nfp] if self.nfp else []
+        else:
+            self.nfp_parts = compute_nfp_parts(self.poly_a, self.poly_b)
+            self.nfp = None
+        
+        # Precompute candidate directions for general case
+        if not self.both_convex:
+            self.base_dirs = precompute_normals(self.nfp_parts)
+            # Precompute flattened edges for fast ray intersection
+            self.flat_edges = []
+            for part_idx, part in enumerate(self.nfp_parts):
+                n = len(part)
+                for i in range(n):
+                    j = (i + 1) % n
+                    self.flat_edges.append((part_idx, part[i][0], part[i][1], part[j][0], part[j][1]))
+    
+    def solve(self, move_vec):
+        query = (self.ref_point[0] + move_vec[0], self.ref_point[1] + move_vec[1])
+        
+        if self.both_convex and self.nfp:
+            return self._solve_convex(query)
+        elif self.nfp_parts:
+            return self._solve_general(query)
+        else:
+            return (0.0, 0.0)
+    
+    def _solve_convex(self, query):
+        pip = point_in_polygon(query, self.nfp)
+        if pip <= 0:
+            return (0.0, 0.0)
+        
+        min_d = float('inf')
+        best_cp = None
+        n = len(self.nfp)
+        for i in range(n):
+            j = (i + 1) % n
+            cp, d = closest_point_on_segment(query, self.nfp[i], self.nfp[j])
+            if d < min_d:
+                min_d = d
+                best_cp = cp
+        
+        if best_cp is None:
+            return (0.0, 0.0)
+        return (best_cp[0] - query[0], best_cp[1] - query[1])
+    
+    def _solve_general(self, query):
+        # Find which parts contain the query
+        containing = []
+        for i, part in enumerate(self.nfp_parts):
+            if point_in_polygon(query, part) > 0:
+                containing.append(i)
+        
+        if not containing:
+            return (0.0, 0.0)
+        
+        containing_set = set(containing)
+        qx, qy = query
+        
+        # Build candidate directions:
+        # 1. Precomputed edge normals (from all parts)
+        # 2. Directions from query to vertices of containing parts
+        dirs = list(self.base_dirs)
+        
+        for idx in containing:
+            part = self.nfp_parts[idx]
+            for v in part:
+                dx, dy = v[0] - qx, v[1] - qy
+                ln = math.sqrt(dx*dx + dy*dy)
+                if ln > EPS:
+                    key = (round(dx/ln, 8), round(dy/ln, 8))
+                    dirs.append(key)
+        
+        # Deduplicate
+        dirs = list(set(dirs))
+        
+        best_t = float('inf')
+        best_dx = 0.0
+        best_dy = 0.0
+        
+        for dx, dy in dirs:
+            # For each containing part, find ray exit (first edge intersection with t > 0)
+            max_exit_t = 0.0
+            valid = True
+            
+            for idx in containing:
+                part = self.nfp_parts[idx]
+                n = len(part)
+                min_t = float('inf')
+                for i in range(n):
+                    j = (i + 1) % n
+                    t = ray_segment_intersect_t(qx, qy, dx, dy,
+                                                 part[i][0], part[i][1],
+                                                 part[j][0], part[j][1])
+                    if t > EPS and t < min_t:
+                        min_t = t
+                
+                if min_t == float('inf'):
+                    valid = False
+                    break
+                max_exit_t = max(max_exit_t, min_t)
+            
+            if not valid or max_exit_t < EPS:
+                continue
+            
+            # Check that the exit point is outside ALL parts
+            # (not just the containing ones - might enter a new part)
+            mx, my = qx + dx * (max_exit_t + EPS * 100), qy + dy * (max_exit_t + EPS * 100)
+            
+            all_outside = True
+            for i, part in enumerate(self.nfp_parts):
+                if point_in_polygon((mx, my), part) > 0:
+                    all_outside = False
+                    break
+            
+            if all_outside and max_exit_t < best_t:
+                best_t = max_exit_t
+                best_dx = dx * max_exit_t
+                best_dy = dy * max_exit_t
+            elif not all_outside:
+                # Try to advance further - iteratively exit new parts
+                t_current = max_exit_t
+                for _ in range(20):
+                    mx2, my2 = qx + dx * (t_current + EPS * 100), qy + dy * (t_current + EPS * 100)
+                    new_containing = []
+                    for i, part in enumerate(self.nfp_parts):
+                        if point_in_polygon((mx2, my2), part) > 0:
+                            new_containing.append(i)
+                    
+                    if not new_containing:
+                        if t_current < best_t:
+                            best_t = t_current
+                            best_dx = dx * t_current
+                            best_dy = dy * t_current
+                        break
+                    
+                    new_max = t_current
+                    failed = False
+                    for idx in new_containing:
+                        part = self.nfp_parts[idx]
+                        n = len(part)
+                        min_t = float('inf')
+                        for i in range(n):
+                            j = (i + 1) % n
+                            t = ray_segment_intersect_t(qx, qy, dx, dy,
+                                                         part[i][0], part[i][1],
+                                                         part[j][0], part[j][1])
+                            if t > t_current + EPS and t < min_t:
+                                min_t = t
+                        
+                        if min_t == float('inf'):
+                            failed = True
+                            break
+                        new_max = max(new_max, min_t)
+                    
+                    if failed or new_max <= t_current + EPS:
+                        break
+                    t_current = new_max
+        
+        return (best_dx, best_dy)
 
-    poly1 = [Vector2D(float(tokens[0]), float(tokens[1]))]
-    for _ in range(cnt1 - 1):
-        line = sys.stdin.readline()
-        if not line:
-            raise EOFError
-        x, y = map(float, line.split())
-        poly1.append(Vector2D(x, y))
-
-    poly2 = []
-    for _ in range(cnt2):
-        line = sys.stdin.readline()
-        if not line:
-            raise EOFError
-        x, y = map(float, line.split())
-        poly2.append(Vector2D(x, y))
-
-    return poly1, poly2
-
-
+# ============================================================
+# Main I/O
+# ============================================================
 
 def main():
-    global n1, n2, m, polygon1_vertices, polygon2_vertices, test_cases
+    inp = sys.stdin
 
-    line = sys.stdin.readline()
-    if not line:
-        return
-
+    # =============== 1. read polygons ===================
+    line = inp.readline()
     try:
         n1, n2 = map(int, line.split())
     except ValueError:
-        print("Input data error: wrong polygon vertex count.", file=sys.stderr)
+        print('Input data error: wrong polygon vertex count.', file=sys.stderr)
         return
 
-    try:
-        polygon1_vertices, polygon2_vertices = _read_polygons_flexibly(n1, n2)
-    except Exception as exc:
-        print(f"Input data error while reading polygons: {exc}", file=sys.stderr)
+    poly_a = []
+    for _ in range(n1):
+        x, y = map(float, inp.readline().split())
+        poly_a.append((x, y))
+
+    poly_b = []
+    for _ in range(n2):
+        x, y = map(float, inp.readline().split())
+        poly_b.append((x, y))
+
+    # wait for OK to ensure all polygon data is received
+    ok = inp.readline().strip()
+    if ok != "OK":
+        print(f"Error: expected OK, got {ok}", file=sys.stderr)
         return
 
-    ok_response = sys.stdin.readline().strip()
-    if ok_response != "OK":
-        print(
-            f"Input data error: waiting for OK after obtaining polygons but I get {ok_response}",
-            file=sys.stderr,
-        )
-        return
+    # ============== 2. preprocess ===================
+    solver = Solver(poly_a, poly_b)
 
-    pre_process()
+    # send OK after finishing preprocessing
     print("OK")
     sys.stdout.flush()
 
-    line = sys.stdin.readline()
-    if not line:
-        print("Input data error: missing test case count.", file=sys.stderr)
-        return
-
-    m = int(line)
+    # ============== 3. read test points ===================
+    m = int(inp.readline())
+    test_cases = []
     for _ in range(m):
-        x, y = map(float, sys.stdin.readline().split())
-        test_cases.append(Vector2D(x, y))
+        x, y = map(float, inp.readline().split())
+        test_cases.append((x, y))
 
-    ok_response = sys.stdin.readline().strip()
-    if ok_response != "OK":
-        print(
-            "Input data error: waiting for OK after that I have received all test points "
-            f"but I get {ok_response}",
-            file=sys.stderr,
-        )
+    # wait for OK to ensure all test cases are received
+    ok = inp.readline().strip()
+    if ok != "OK":
+        print(f"Error: expected OK, got {ok}", file=sys.stderr)
         return
 
-
-    for test_case in test_cases:
-        res = gen_solution(test_case)
-        print(f"{res.x:.5f} {res.y:.5f}")
+    # ================ 4. solve and output results ===================
+    for vec in test_cases:
+        res = solver.solve(vec)
+        rx = res[0] + 0.0
+        ry = res[1] + 0.0
+        sx = f"{rx:.5f}"
+        sy = f"{ry:.5f}"
+        # Eliminate negative zero from formatted output
+        if sx == "-0.00000":
+            sx = "0.00000"
+        if sy == "-0.00000":
+            sy = "0.00000"
+        print(f"{sx} {sy}")
         sys.stdout.flush()
 
+    # send OK after outputting all answers
     print("OK")
     sys.stdout.flush()
-
 
 if __name__ == "__main__":
     main()
