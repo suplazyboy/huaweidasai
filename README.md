@@ -13,6 +13,7 @@ bash run_and_test.sh <solution_file> <input_file> <output_file>
 ## 执行如下命令可运行此demo程序
 ```
 bash run_and_test.sh ./demos/Solution.py ./data/practice_3.in ./PythonOut/practice_3.out
+bash run_and_test.sh ./demos/Solution_WY.cpp ./data/practice_3.in ./PythonOut/practice_3.out
 bash run_and_test.sh ./C++Solution/Solution.cpp ./data/practice_1.in ./C++Out/practice_1.out
 bash run_and_test.sh ./C++Solution/Solution.cpp ./data/practice_2.in ./C++Out/practice_2.out
 bash run_and_test.sh ./C++Solution/Solution.cpp ./data/practice_3.in ./C++Out/practice_3.out

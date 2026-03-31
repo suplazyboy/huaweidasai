@@ -400,6 +400,8 @@ int main(){
     for(int i=0;i<m;i++)scanf("%lf%lf",&tests[i].x,&tests[i].y);
     scanf("%s",buf);// "OK"
 
+    printf("%d\n", m);
+    fflush(stdout);
     // ---- solve and output ----
     for(int i=0;i<m;i++){
         V query=data.refPt+tests[i];
@@ -410,8 +412,9 @@ int main(){
         if(fabs(rx)<5e-6)rx=0;
         if(fabs(ry)<5e-6)ry=0;
         printf("%.5f %.5f\n",rx,ry);
+        fflush(stdout);
     }
-    fflush(stdout);
+    
     printf("OK\n");fflush(stdout);
     return 0;
 }
